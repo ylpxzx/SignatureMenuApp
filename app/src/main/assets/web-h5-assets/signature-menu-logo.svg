@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="220" viewBox="0 0 720 220" role="img" aria-labelledby="title desc">
+  <title id="title">Signature Menu logo</title>
+  <desc id="desc">A rounded green menu card mark with a signature stroke, paired with the Signature Menu wordmark.</desc>
+  <defs>
+    <linearGradient id="mark-bg" x1="34" y1="26" x2="188" y2="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#163F2E"/>
+      <stop offset="1" stop-color="#1FA66A"/>
+    </linearGradient>
+    <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#133925" flood-opacity=".16"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#soft-shadow)">
+    <rect x="28" y="28" width="164" height="164" rx="36" fill="url(#mark-bg)"/>
+  </g>
+
+  <path
+    d="M76 55h67c12.15 0 22 9.85 22 22v83l-15.2-8.4-15.2 8.4-15.2-8.4-15.2 8.4-15.2-8.4L76 160V77c0-12.15 9.85-22 22-22Z"
+    fill="#F7FAF5"
+  />
+  <path d="M140 55v24c0 5.52 4.48 10 10 10h15" fill="#DDF4E7"/>
+  <path d="M140 55l25 34" fill="none" stroke="#BFE8D0" stroke-width="4" stroke-linecap="round"/>
+  <path d="M94 83h39" fill="none" stroke="#1FA66A" stroke-width="6" stroke-linecap="round"/>
+  <path d="M94 104h25" fill="none" stroke="#A8DDBE" stroke-width="6" stroke-linecap="round"/>
+  <path
+    d="M82 127c21.5-42 55.5-45 46.5-12.5-6.8 24.4-35.9 25.4-33.4 4.9 2.4-19.8 34.7-22.7 59.9 18.6"
+    fill="none"
+    stroke="#163F2E"
+    stroke-width="10"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <circle cx="154" cy="138" r="7" fill="#FFB85C"/>
+
+  <g fill="#1F2924">
+    <text x="226" y="99" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="48" font-weight="800" letter-spacing="0">Signature Menu</text>
+    <text x="228" y="137" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="23" font-weight="700" letter-spacing="0" fill="#4F5D55">拿手菜单</text>
+    <text x="228" y="166" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="17" font-weight="600" letter-spacing="0" fill="#7E8A83">Choose from what you cook best.</text>
+  </g>
+</svg>
