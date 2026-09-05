@@ -15,7 +15,12 @@ class SignatureMenuStore(context: Context) {
         }
 
         return runCatching {
-            parseData(JSONObject(dataFile.readText()))
+            val parsed = parseData(JSONObject(dataFile.readText()))
+            val cleaned = removeLegacySeedData(deduplicateImportedData(parsed))
+            if (cleaned != parsed) {
+                save(cleaned)
+            }
+            cleaned
         }.getOrElse {
             seedData().also(::save)
         }
@@ -50,41 +55,67 @@ class SignatureMenuStore(context: Context) {
             throw IllegalArgumentException("没有识别到可导入的 SignatureMenu 数据。")
         }
 
+        var next = removeLegacySeedData(deduplicateImportedData(current))
         val idMap = mutableMapOf<String, String>()
         val servedCounts = countServedRecipes(menuArray)
-        val importedRecipes = mutableListOf<Recipe>()
+        var importedRecipeCount = 0
 
         for (index in 0 until recipeArray.length()) {
             val source = recipeArray.optJSONObject(index) ?: continue
             val oldId = source.stringValue("id")
             val recipe = parseRecipe(source)
-            val newRecipe = recipe.copy(
-                id = newId(),
+            if (isLegacySeedRecipe(recipe)) continue
+            val existingRecipe = next.recipes.firstOrNull { oldId.isNotBlank() && it.id == oldId }
+                ?: next.recipes.firstOrNull { recipeImportKey(it) == recipeImportKey(recipe) }
+            if (existingRecipe != null) {
+                if (oldId.isNotBlank()) {
+                    idMap[oldId] = existingRecipe.id
+                }
+                continue
+            }
+
+            val importedRecipe = recipe.copy(
+                id = oldId.ifBlank { recipe.id },
                 cookedCount = (recipe.cookedCount - (servedCounts[oldId] ?: 0)).coerceAtLeast(0),
-                createdAt = nowIso(),
                 updatedAt = nowIso(),
             )
             if (oldId.isNotBlank()) {
-                idMap[oldId] = newRecipe.id
+                idMap[oldId] = importedRecipe.id
             }
-            importedRecipes += newRecipe
+            next = next.copy(recipes = next.recipes + importedRecipe)
+            importedRecipeCount += 1
         }
 
-        var next = current.copy(recipes = current.recipes + importedRecipes)
         var importedMenuCount = 0
         for (index in 0 until menuArray.length()) {
             val source = menuArray.optJSONObject(index) ?: continue
-            val menu = parseMenu(source, idMap).copy(
-                id = newId(),
-                createdAt = nowIso(),
-                updatedAt = nowIso(),
-            )
+            val oldId = source.stringValue("id")
+            val menu = parseMenu(source, idMap)
+            if (isLegacySeedMenu(menu)) continue
             if (menu.dateKey.isBlank()) continue
-            next = upsertMenu(next, menu)
+
+            val existingMenuById = next.menus.firstOrNull { oldId.isNotBlank() && it.id == oldId }
+            val menuToImport: MenuRecord? = if (existingMenuById != null) {
+                menu.copy(
+                    id = existingMenuById.id,
+                    createdAt = existingMenuById.createdAt,
+                    updatedAt = nowIso(),
+                )
+            } else {
+                val duplicateMenu = next.menus.firstOrNull { menuImportKey(it) == menuImportKey(menu) }
+                if (duplicateMenu == null) {
+                    menu.copy(id = oldId.ifBlank { menu.id }, updatedAt = nowIso())
+                } else {
+                    null
+                }
+            }
+            if (menuToImport == null) continue
+
+            next = upsertMenu(next, menuToImport)
             importedMenuCount += 1
         }
 
-        return next to ImportResult(importedRecipes.size, importedMenuCount)
+        return removeLegacySeedData(deduplicateImportedData(next)) to ImportResult(importedRecipeCount, importedMenuCount)
     }
 }
 
@@ -133,6 +164,117 @@ fun updateMenuStatus(data: SignatureMenuData, menuId: String, status: MenuStatus
     return upsertMenu(data, menu.copy(status = status))
 }
 
+private fun deduplicateImportedData(data: SignatureMenuData): SignatureMenuData {
+    val duplicateRecipeIds = mutableMapOf<String, String>()
+    val recipeKeys = mutableMapOf<String, Recipe>()
+    val recipes = mutableListOf<Recipe>()
+    data.recipes.forEach { recipe ->
+        val key = recipeImportKey(recipe)
+        val existing = recipeKeys[key]
+        if (existing == null) {
+            recipeKeys[key] = recipe
+            recipes += recipe
+        } else {
+            duplicateRecipeIds[recipe.id] = existing.id
+        }
+    }
+
+    val menusWithRecipeIds = data.menus.map { menu ->
+        val recipeIds = menu.recipeIds
+            .map { duplicateRecipeIds[it] ?: it }
+            .filter { it.isNotBlank() }
+            .distinct()
+        val dishes = menu.dishes
+            .map { dish -> dish.copy(recipeId = duplicateRecipeIds[dish.recipeId] ?: dish.recipeId) }
+            .filter { it.recipeId.isNotBlank() || it.name.isNotBlank() }
+            .distinctBy { "${it.recipeId}|${it.name.importKeyPart()}|${it.count}" }
+        menu.copy(recipeIds = recipeIds, dishes = dishes)
+    }
+
+    val menuKeys = mutableSetOf<String>()
+    val menus = mutableListOf<MenuRecord>()
+    menusWithRecipeIds.forEach { menu ->
+        if (menuKeys.add(menuImportKey(menu))) {
+            menus += menu
+        }
+    }
+
+    return data.copy(recipes = recipes, menus = menus)
+}
+
+private fun removeLegacySeedData(data: SignatureMenuData): SignatureMenuData {
+    val legacyRecipeIds = data.recipes
+        .filter(::isLegacySeedRecipe)
+        .map { it.id }
+        .toSet()
+    if (legacyRecipeIds.isEmpty() && data.menus.none(::isLegacySeedMenu)) return data
+
+    val recipes = data.recipes.filterNot { it.id in legacyRecipeIds }
+    val menus = data.menus
+        .filterNot(::isLegacySeedMenu)
+        .map { menu ->
+            val recipeIds = menu.recipeIds.filterNot { it in legacyRecipeIds }
+            val dishes = menu.dishes.filterNot { it.recipeId in legacyRecipeIds }
+            menu.copy(recipeIds = recipeIds, dishes = dishes)
+        }
+    return data.copy(recipes = recipes, menus = menus)
+}
+
+private fun isLegacySeedRecipe(recipe: Recipe): Boolean = when (recipe.name.trim()) {
+    "番茄炒蛋" -> recipe.description == "酸甜下饭，十几分钟就能端上桌。" && recipe.cookingMethod == "炒"
+    "香煎鸡腿排" -> recipe.description == "外皮脆一点，里面保持多汁。" && recipe.cookingMethod == "煎"
+    "玉米排骨汤" -> recipe.description == "清甜耐喝，适合周末慢慢炖。" && recipe.cookingMethod == "炖"
+    else -> false
+}
+
+private fun isLegacySeedMenu(menu: MenuRecord): Boolean =
+    menu.title == "今晚家常菜单" && menu.note == "清爽一点，留一碗汤。"
+
+private fun recipeImportKey(recipe: Recipe): String = listOf(
+    recipe.name.importKeyPart(),
+    recipe.description.importKeyPart(),
+    recipe.cookingMethod.importKeyPart(),
+    recipe.servingCount.toString(),
+    recipe.estimatedMinutes.toString(),
+    recipe.difficulty.toString(),
+    recipe.isAvailable.toString(),
+    recipe.tasteTags.joinToString(",") { it.importKeyPart() },
+    recipe.proficiency.toString(),
+    recipe.priceRange.importKeyPart(),
+    recipe.privateNote.importKeyPart(),
+    recipe.ingredients.joinToString("||") { ingredient ->
+        listOf(
+            ingredient.name.importKeyPart(),
+            ingredient.amount.importKeyPart(),
+            ingredient.unit.importKeyPart(),
+            ingredient.note.importKeyPart(),
+        ).joinToString("|")
+    },
+    recipe.steps.joinToString("||") { step ->
+        listOf(
+            step.order.toString(),
+            step.title.importKeyPart(),
+            step.description.importKeyPart(),
+            step.estimatedMinutes.toString(),
+        ).joinToString("|")
+    },
+).joinToString("\u001F")
+
+private fun menuImportKey(menu: MenuRecord): String = listOf(
+    menu.title.importKeyPart(),
+    menu.note.importKeyPart(),
+    menu.dateKey.importKeyPart(),
+    menu.time.importKeyPart(),
+    menu.status.name,
+    menu.dinerCount.toString(),
+    menu.recipeIds.joinToString(","),
+    menu.dishes.joinToString("||") { dish ->
+        listOf(dish.recipeId, dish.name.importKeyPart(), dish.count.toString()).joinToString("|")
+    },
+).joinToString("\u001F")
+
+private fun String.importKeyPart(): String = trim().replace(Regex("\\s+"), " ").lowercase()
+
 private fun applyCookedTransition(
     data: SignatureMenuData,
     before: MenuRecord?,
@@ -161,87 +303,7 @@ private fun applyCookedTransition(
     return data.copy(recipes = recipes)
 }
 
-private fun seedData(): SignatureMenuData {
-    val tomatoEgg = Recipe(
-        name = "番茄炒蛋",
-        description = "酸甜下饭，十几分钟就能端上桌。",
-        cookingMethod = "炒",
-        servingCount = 2,
-        estimatedMinutes = 15,
-        difficulty = 1,
-        tasteTags = listOf("家常", "下饭", "酸甜"),
-        proficiency = 4,
-        cookedCount = 3,
-        ingredients = listOf(
-            Ingredient(name = "番茄", amount = "2", unit = "个"),
-            Ingredient(name = "鸡蛋", amount = "3", unit = "个"),
-            Ingredient(name = "葱花", amount = "少许", unit = ""),
-        ),
-        steps = listOf(
-            RecipeStep(order = 1, title = "炒蛋", description = "鸡蛋打散，热锅滑熟后盛出。", estimatedMinutes = 4),
-            RecipeStep(order = 2, title = "炒番茄", description = "番茄炒软出汁，再倒回鸡蛋。", estimatedMinutes = 7),
-            RecipeStep(order = 3, title = "收味", description = "加盐和少量糖，撒葱花出锅。", estimatedMinutes = 2),
-        ),
-    )
-    val chicken = Recipe(
-        name = "香煎鸡腿排",
-        description = "外皮脆一点，里面保持多汁。",
-        cookingMethod = "煎",
-        servingCount = 2,
-        estimatedMinutes = 28,
-        difficulty = 3,
-        tasteTags = listOf("肉菜", "香口", "便当"),
-        proficiency = 3,
-        cookedCount = 1,
-        ingredients = listOf(
-            Ingredient(name = "去骨鸡腿", amount = "2", unit = "块"),
-            Ingredient(name = "黑胡椒", amount = "适量", unit = ""),
-            Ingredient(name = "生抽", amount = "1", unit = "勺"),
-        ),
-        steps = listOf(
-            RecipeStep(order = 1, title = "腌制", description = "鸡腿排擦干，生抽、盐和黑胡椒腌 15 分钟。", estimatedMinutes = 15),
-            RecipeStep(order = 2, title = "慢煎", description = "皮朝下小火煎至金黄，再翻面煎熟。", estimatedMinutes = 12),
-        ),
-    )
-    val soup = Recipe(
-        name = "玉米排骨汤",
-        description = "清甜耐喝，适合周末慢慢炖。",
-        cookingMethod = "炖",
-        servingCount = 4,
-        estimatedMinutes = 70,
-        difficulty = 2,
-        tasteTags = listOf("汤", "清甜", "暖胃"),
-        proficiency = 3,
-        cookedCount = 2,
-        ingredients = listOf(
-            Ingredient(name = "排骨", amount = "500", unit = "克"),
-            Ingredient(name = "玉米", amount = "1", unit = "根"),
-            Ingredient(name = "胡萝卜", amount = "1", unit = "根"),
-        ),
-        steps = listOf(
-            RecipeStep(order = 1, title = "焯水", description = "排骨冷水下锅，煮出浮沫后洗净。", estimatedMinutes = 12),
-            RecipeStep(order = 2, title = "炖煮", description = "加入玉米、胡萝卜和清水，小火炖到排骨软。", estimatedMinutes = 55),
-        ),
-    )
-    val today = LocalDate.now()
-    val menu = MenuRecord(
-        title = "今晚家常菜单",
-        note = "清爽一点，留一碗汤。",
-        dateKey = today.toString(),
-        time = "18:30",
-        status = MenuStatus.Pending,
-        dinerCount = 3,
-        recipeIds = listOf(tomatoEgg.id, soup.id),
-        dishes = listOf(
-            MenuDish(recipeId = tomatoEgg.id, name = tomatoEgg.name),
-            MenuDish(recipeId = soup.id, name = soup.name),
-        ),
-    )
-    return SignatureMenuData(
-        recipes = listOf(tomatoEgg, chicken, soup),
-        menus = listOf(menu),
-    )
-}
+private fun seedData(): SignatureMenuData = SignatureMenuData()
 
 private fun SignatureMenuData.toJson(): JSONObject = JSONObject()
     .put("profile", JSONObject().put("display_name", profile.displayName).put("username", profile.username))
